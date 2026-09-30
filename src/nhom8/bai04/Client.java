@@ -5,12 +5,12 @@ import java.net.*;
 import java.util.Scanner;
 
 /**
- * Client - Kết nối tới Server và gửi tin nhắn hoặc file
- * 
+ * Client - Kết nối tới Server, gửi tin nhắn/file, và nhận tin từ Client khác
+ *
  * Luồng hoạt động:
- * 1. Nhập IP và Port của Server (dùng IP ZeroTier khi test khác mạng)
- * 2. Kết nối tới Server
- * 3. Hiện menu: Gửi tin nhắn / Gửi file / Thoát
+ * 1. Kết nối tới Server qua IP ZeroTier
+ * 2. Khởi tạo 1 luồng ngầm (LangNghe) chuyên nhận tin nhắn từ Server/Client khác
+ * 3. Luồng chính hiển thị menu để người dùng gõ tin nhắn hoặc gửi file
  */
 public class Client {
 
@@ -20,8 +20,6 @@ public class Client {
         System.out.println("=== NHOM 8 - CLIENT ===");
 
         // --- Nhập IP Server ---
-        // Nếu test trên cùng 1 máy: dùng 127.0.0.1
-        // Nếu test qua ZeroTier: nhập IP ZeroTier của máy chạy Server
         System.out.print("Nhap IP Server (Enter = 127.0.0.1): ");
         String ip = sc.nextLine().trim();
         if (ip.isEmpty()) {
@@ -39,7 +37,7 @@ public class Client {
         System.out.println("Dang ket noi toi " + ip + ":" + port + " ...");
 
         try {
-            // Tạo kết nối TCP Socket tới Server
+            // Kết nối tới Server
             Socket socket = new Socket(ip, port);
             System.out.println("Ket noi thanh cong!\n");
 
@@ -49,12 +47,18 @@ public class Client {
             // Tạo luồng nhận dữ liệu từ Server
             DataInputStream input = new DataInputStream(socket.getInputStream());
 
+            // ========== PHẦN MỚI: Luồng lắng nghe tin nhắn từ Server ==========
+            // Luồng này chạy ngầm, liên tục đọc tin nhắn broadcast từ Server
+            // (tin nhắn của Client khác hoặc thông báo hệ thống)
+            Thread luongNghe = new Thread(new LangNghe(input));
+            luongNghe.setDaemon(true); // Daemon = tự động tắt khi chương trình chính thoát
+            luongNghe.start();
+
             boolean chay = true;
 
             while (chay) {
-                // Hiển thị menu
-                System.out.println("--- MENU ---");
-                System.out.println("1. Gui tin nhan (Ma hoa AES)");
+                System.out.println("\n--- MENU ---");
+                System.out.println("1. Gui tin nhan (Broadcast - Ma hoa AES)");
                 System.out.println("2. Gui file");
                 System.out.println("3. Thoat");
                 System.out.print("Chon (1/2/3): ");
@@ -67,19 +71,17 @@ public class Client {
                         System.out.print("Nhap tin nhan: ");
                         String tinNhan = sc.nextLine();
 
-                        // Mã hóa tin nhắn trước khi gửi (bảo mật AES)
+                        // Mã hóa trước khi gửi
                         String tinMaHoa = CryptoUtil.encrypt(tinNhan);
                         System.out.println("Tin nhan sau ma hoa: " + tinMaHoa);
 
-                        // Gửi lệnh "MSG" để Server biết đây là tin nhắn
+                        // Gửi lệnh MSG + tin đã mã hóa lên Server
                         output.writeUTF("MSG");
-                        // Gửi nội dung tin nhắn đã mã hóa
                         output.writeUTF(tinMaHoa);
                         output.flush();
 
-                        // Đọc phản hồi từ Server
-                        String phanHoi = input.readUTF();
-                        System.out.println("[Server]: " + phanHoi + "\n");
+                        // Không cần đọc phản hồi ở đây nữa
+                        // Luồng LangNghe sẽ tự động nhận và in ra màn hình
                         break;
 
                     case "2":
@@ -87,18 +89,15 @@ public class Client {
                         System.out.print("Nhap duong dan file: ");
                         String duongDan = sc.nextLine().trim();
 
-                        // Kiểm tra file có tồn tại không
                         File file = new File(duongDan);
                         if (!file.exists()) {
-                            System.out.println("File khong ton tai!\n");
+                            System.out.println("File khong ton tai!");
                             break;
                         }
 
-                        // Gửi lệnh "FILE" để Server biết đây là file
+                        // Gửi lệnh FILE + tên + kích thước
                         output.writeUTF("FILE");
-                        // Gửi tên file
                         output.writeUTF(file.getName());
-                        // Gửi kích thước file (số byte)
                         output.writeLong(file.length());
 
                         // Đọc file và gửi từng khối 4KB
@@ -113,10 +112,7 @@ public class Client {
                         fis.close();
 
                         System.out.println("Da gui xong file: " + file.getName());
-
-                        // Đọc phản hồi từ Server
-                        String phanHoiFile = input.readUTF();
-                        System.out.println("[Server]: " + phanHoiFile + "\n");
+                        // Luồng LangNghe sẽ tự nhận thông báo xác nhận từ Server
                         break;
 
                     case "3":
@@ -128,18 +124,55 @@ public class Client {
                         break;
 
                     default:
-                        System.out.println("Lua chon khong hop le!\n");
+                        System.out.println("Lua chon khong hop le!");
                         break;
                 }
             }
 
-            // Đóng kết nối
             socket.close();
 
         } catch (ConnectException e) {
             System.out.println("Khong the ket noi! Kiem tra Server da chay chua va IP/Port co dung khong.");
         } catch (IOException e) {
             System.out.println("Loi mang: " + e.getMessage());
+        }
+    }
+}
+
+/**
+ * Luồng lắng nghe - chạy ngầm, liên tục nhận tin nhắn từ Server
+ *
+ * Server sẽ gửi 2 loại tin nhắn:
+ * - "CHAT"     : Tin nhắn chat từ Client khác (broadcast)
+ * - "THONGBAO" : Thông báo hệ thống (xác nhận gửi file, v.v.)
+ */
+class LangNghe implements Runnable {
+
+    private DataInputStream input;
+
+    LangNghe(DataInputStream input) {
+        this.input = input;
+    }
+
+    @Override
+    public void run() {
+        try {
+            while (true) {
+                // Đọc loại tin nhắn
+                String loai = input.readUTF();
+                // Đọc nội dung
+                String noiDung = input.readUTF();
+
+                if (loai.equals("CHAT")) {
+                    // Tin nhắn từ Client khác -> in ra màn hình
+                    System.out.println("\n" + noiDung);
+                } else if (loai.equals("THONGBAO")) {
+                    // Thông báo hệ thống
+                    System.out.println("\n[Thong bao]: " + noiDung);
+                }
+            }
+        } catch (IOException e) {
+            System.out.println("\nMat ket noi voi Server.");
         }
     }
 }

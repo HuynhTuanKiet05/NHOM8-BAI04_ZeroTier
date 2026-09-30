@@ -2,51 +2,65 @@ package nhom8.bai04;
 
 import java.io.*;
 import java.net.*;
+import java.util.ArrayList;
 
 /**
- * Server - Máy chủ lắng nghe kết nối từ Client
- * 
+ * Server - Máy chủ hỗ trợ nhiều Client chat với nhau (Broadcast)
+ *
  * Luồng hoạt động:
  * 1. Server mở cổng 5000 và chờ Client kết nối
- * 2. Khi có Client kết nối -> tạo 1 Thread riêng để phục vụ Client đó
- * 3. Server tiếp tục chờ Client tiếp theo (hỗ trợ nhiều Client cùng lúc)
+ * 2. Khi có Client mới -> lưu vào danh sách, tạo Thread riêng phục vụ
+ * 3. Khi Client gửi tin nhắn -> Server chuyển tiếp (broadcast) cho TẤT CẢ Client khác
+ * 4. Khi Client gửi file -> Server lưu file và thông báo cho mọi người
  */
 public class Server {
 
-    // Cổng mà Server lắng nghe (Client phải kết nối đúng cổng này)
     static final int PORT = 5000;
+
+    // Danh sách lưu tất cả Client đang online (dùng để broadcast tin nhắn)
+    static ArrayList<ThongTinClient> danhSachClient = new ArrayList<>();
 
     public static void main(String[] args) {
 
-        // Tạo thư mục để lưu file nhận được từ Client
+        // Tạo thư mục lưu file nhận được
         File folder = new File("server_files");
         if (!folder.exists()) {
             folder.mkdir();
         }
 
-        System.out.println("=== NHOM 8 - SERVER ===");
+        System.out.println("=== NHOM 8 - SERVER (BROADCAST CHAT) ===");
         System.out.println("Server dang lang nghe o port: " + PORT);
         System.out.println("Thu muc luu file: " + folder.getAbsolutePath());
+        System.out.println("Dang cho Client ket noi...\n");
 
         try {
-            // Tạo ServerSocket để lắng nghe kết nối trên cổng PORT
             ServerSocket serverSocket = new ServerSocket(PORT);
-            System.out.println("Dang cho Client ket noi...\n");
 
             int soClient = 0;
 
-            // Vòng lặp vô hạn: luôn chờ Client mới kết nối
             while (true) {
-                // accept() sẽ DỪNG ở đây cho đến khi có 1 Client kết nối vào
+                // Chờ Client kết nối
                 Socket socket = serverSocket.accept();
                 soClient++;
 
                 String clientIP = socket.getInetAddress().getHostAddress();
                 System.out.println("[+] Client #" + soClient + " da ket noi tu IP: " + clientIP);
 
+                // Tạo luồng đọc/ghi cho Client này
+                DataInputStream input = new DataInputStream(socket.getInputStream());
+                DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+
+                // Lưu thông tin Client vào danh sách
+                ThongTinClient thongTin = new ThongTinClient(soClient, output);
+                themClient(thongTin);
+
+                // Thông báo cho tất cả Client khác biết có người mới vào
+                guiChoTatCa("CHAT",
+                        "[Server]: Client #" + soClient + " (" + clientIP + ") da tham gia phong chat!",
+                        soClient);
+
                 // Tạo Thread riêng để xử lý Client này
-                // Nhờ đó Server có thể phục vụ nhiều Client cùng lúc (Multi-threading)
-                Thread thread = new Thread(new XuLyClient(socket, soClient));
+                Thread thread = new Thread(new XuLyClient(socket, input, output, thongTin));
                 thread.start();
             }
 
@@ -54,107 +68,166 @@ public class Server {
             System.out.println("Loi Server: " + e.getMessage());
         }
     }
+
+    /**
+     * Gửi tin nhắn cho TẤT CẢ Client khác (trừ người gửi)
+     * synchronized = chỉ cho 1 Thread gọi hàm này tại 1 thời điểm (tránh xung đột)
+     */
+    static synchronized void guiChoTatCa(String loai, String noiDung, int idNguoiGui) {
+        for (ThongTinClient client : danhSachClient) {
+            // Không gửi lại cho chính người gửi
+            if (client.id != idNguoiGui) {
+                try {
+                    client.output.writeUTF(loai);
+                    client.output.writeUTF(noiDung);
+                    client.output.flush();
+                } catch (IOException e) {
+                    // Client đã mất kết nối, bỏ qua
+                }
+            }
+        }
+    }
+
+    /**
+     * Gửi tin nhắn cho 1 Client cụ thể (dùng để gửi xác nhận riêng)
+     */
+    static synchronized void guiRieng(DataOutputStream output, String loai, String noiDung) {
+        try {
+            output.writeUTF(loai);
+            output.writeUTF(noiDung);
+            output.flush();
+        } catch (IOException e) {
+            // Client đã mất kết nối
+        }
+    }
+
+    // Thêm Client vào danh sách
+    static synchronized void themClient(ThongTinClient client) {
+        danhSachClient.add(client);
+    }
+
+    // Xóa Client khỏi danh sách
+    static synchronized void xoaClient(ThongTinClient client) {
+        danhSachClient.remove(client);
+    }
 }
 
 /**
- * Lớp xử lý cho từng Client trên một Thread riêng biệt
- * Implements Runnable để có thể chạy trên Thread
+ * Lưu thông tin của mỗi Client đang kết nối
+ */
+class ThongTinClient {
+    int id;                    // Số thứ tự Client
+    DataOutputStream output;   // Luồng ghi để gửi dữ liệu cho Client này
+
+    ThongTinClient(int id, DataOutputStream output) {
+        this.id = id;
+        this.output = output;
+    }
+}
+
+/**
+ * Xử lý từng Client trên Thread riêng biệt
  */
 class XuLyClient implements Runnable {
 
-    private Socket socket;  // Kết nối với Client
-    private int clientId;   // Số thứ tự Client
+    private Socket socket;
+    private DataInputStream input;
+    private DataOutputStream output;
+    private ThongTinClient thongTin;
 
-    public XuLyClient(Socket socket, int clientId) {
+    public XuLyClient(Socket socket, DataInputStream input, DataOutputStream output, ThongTinClient thongTin) {
         this.socket = socket;
-        this.clientId = clientId;
+        this.input = input;
+        this.output = output;
+        this.thongTin = thongTin;
     }
 
     @Override
     public void run() {
+        int clientId = thongTin.id;
+
         try {
-            // Tạo luồng đọc dữ liệu từ Client
-            DataInputStream input = new DataInputStream(socket.getInputStream());
-
-            // Tạo luồng ghi dữ liệu gửi về Client
-            DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-
-            // Vòng lặp liên tục đọc lệnh từ Client
             while (true) {
-
-                // Đọc lệnh từ Client (readUTF đọc chuỗi String)
+                // Đọc lệnh từ Client
                 String lenh;
                 try {
                     lenh = input.readUTF();
                 } catch (EOFException e) {
-                    // Client đã đóng kết nối đột ngột
                     break;
                 }
 
-                // ====== XỬ LÝ LỆNH GỬI TIN NHẮN ======
+                // ====== GỬI TIN NHẮN (BROADCAST CHO TẤT CẢ) ======
                 if (lenh.equals("MSG")) {
-                    // Đọc tin nhắn đã mã hóa từ Client
                     String tinMaHoa = input.readUTF();
-
-                    // Giải mã tin nhắn bằng CryptoUtil
                     String tinGoc = CryptoUtil.decrypt(tinMaHoa);
 
                     System.out.println("[Client #" + clientId + " - TIN NHAN]");
                     System.out.println("  Du lieu ma hoa: " + tinMaHoa);
                     System.out.println("  Noi dung goc:   " + tinGoc);
 
-                    // Gửi phản hồi về Client
-                    output.writeUTF("Server da nhan tin nhan: " + tinGoc);
-                    output.flush(); // flush = đẩy dữ liệu đi ngay, không đợi buffer đầy
+                    // Chuyển tiếp tin nhắn cho TẤT CẢ Client khác (Broadcast)
+                    Server.guiChoTatCa("CHAT",
+                            "[Client #" + clientId + "]: " + tinGoc,
+                            clientId);
+
+                    // Gửi xác nhận riêng cho người gửi
+                    Server.guiRieng(output, "THONGBAO",
+                            "Tin nhan da duoc gui den tat ca (" + (Server.danhSachClient.size() - 1) + " nguoi)!");
                 }
 
-                // ====== XỬ LÝ LỆNH GỬI FILE ======
+                // ====== GỬI FILE ======
                 else if (lenh.equals("FILE")) {
-                    // Đọc tên file và kích thước file từ Client
                     String tenFile = input.readUTF();
                     long kichThuoc = input.readLong();
 
-                    System.out.println("[Client #" + clientId + " - FILE] Dang nhan: " + tenFile
-                            + " (" + kichThuoc + " bytes)");
+                    System.out.println("[Client #" + clientId + " - FILE] Dang nhan: "
+                            + tenFile + " (" + kichThuoc + " bytes)");
 
-                    // Tạo file mới để ghi dữ liệu nhận được
+                    // Lưu file vào thư mục server_files
                     File fileLuu = new File("server_files", tenFile);
                     FileOutputStream fos = new FileOutputStream(fileLuu);
 
-                    // Đọc dữ liệu từ Client theo từng khối 4KB và ghi vào file
                     byte[] buffer = new byte[4096];
                     long conLai = kichThuoc;
 
                     while (conLai > 0) {
-                        // Đọc tối đa buffer.length bytes hoặc số byte còn lại
                         int soByteDoc = input.read(buffer, 0, (int) Math.min(buffer.length, conLai));
-                        if (soByteDoc == -1) break; // Hết dữ liệu
-
-                        fos.write(buffer, 0, soByteDoc); // Ghi vào file
+                        if (soByteDoc == -1) break;
+                        fos.write(buffer, 0, soByteDoc);
                         conLai = conLai - soByteDoc;
                     }
-
                     fos.close();
+
                     System.out.println("[OK] Da luu file: " + fileLuu.getAbsolutePath());
 
-                    // Gửi phản hồi về Client
-                    output.writeUTF("Server da nhan file: " + tenFile + " thanh cong!");
-                    output.flush();
+                    // Gửi xác nhận cho người gửi
+                    Server.guiRieng(output, "THONGBAO",
+                            "Server da nhan file: " + tenFile + " thanh cong!");
+
+                    // Thông báo cho tất cả Client khác
+                    Server.guiChoTatCa("CHAT",
+                            "[Server]: Client #" + clientId + " da gui 1 file: " + tenFile,
+                            clientId);
                 }
 
-                // ====== XỬ LÝ LỆNH THOÁT ======
+                // ====== THOÁT ======
                 else if (lenh.equals("EXIT")) {
                     System.out.println("[-] Client #" + clientId + " da thoat.");
                     break;
                 }
             }
 
-            // Đóng kết nối
-            socket.close();
-            System.out.println("[-] Da dong ket noi voi Client #" + clientId);
-
         } catch (IOException e) {
             System.out.println("[-] Client #" + clientId + " mat ket noi: " + e.getMessage());
+        } finally {
+            // Xóa Client khỏi danh sách và thông báo cho mọi người
+            Server.xoaClient(thongTin);
+            Server.guiChoTatCa("CHAT",
+                    "[Server]: Client #" + clientId + " da roi phong chat.",
+                    -1);
+
+            try { socket.close(); } catch (IOException e) {}
+            System.out.println("[-] Da dong ket noi voi Client #" + clientId);
         }
     }
 }
