@@ -1,0 +1,15 @@
+# NetBeans build output
+/build/
+/dist/
+/nbbuild/
+/nbdist/
+
+# Compiled class files
+*.class
+
+# Server received files (runtime)
+/server_files/
+/server_received_files/
+
+# IDE
+/nbproject/private/
